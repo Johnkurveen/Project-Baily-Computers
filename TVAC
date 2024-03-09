@@ -1,1 +1,91 @@
-// The TVAC computer will be an arduino nano with a few sensors in the chamber. Output could be a screen or serial display to a laptop. This is top priority on the avoinics side.
+//Code for TVAC Arduino Nano. Runs up to 8 analog sensors and displays to a laptop through USB
+
+//To-Do 
+//Add thermisters as a sensor type (requires calibration curves and whatnot) (Only if these are valueble in flight)
+//Calibrate LM335s? Should be good to -55C at least, so best for chamber temp. Could do with calibration (pot)
+//Increase resolution by switching to external 3.3V reference? 
+
+
+#define BITS 10
+#define SCALE 0 // Temperature scales 0=K, 1=C, 2=F, 3=R
+#define VREF 5 // go to 3.3 for higher precision? 
+
+
+//int analogPins[] = {0, 1, 2, 3, 6, 7}; // avoid analog pins 4 and 6 as they are used in some serial protocals
+
+
+
+unsigned int maxVal= pow(2, BITS);
+
+unsigned short SensorType[] = {1, 2, 0, 0, 0, 0, 0, 0}; // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister
+int sensorValue[] = {0, 0, 0, 0, 0, 0, 0, 0};
+int sensorTemp[] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+
+void setup() {
+  // initialize serial communications at 9600 bps:
+  //analogReadResolution(12); // may be able to get 12?
+  Serial.begin(9600);
+}
+
+void loop() {
+  // Read sensors, save temp as Kelvin
+  for(int i=0;i<8;i++){
+    //sensorValue[i]=analogRead(i);
+    
+    switch (SensorType[i]) {
+      case 0:
+        sensorTemp[i]=0;
+        break;
+      case 1:
+        //analogReference() // Check safety concerns first
+        sensorValue[i]=analogRead(i);
+        sensorTemp[i]=sensorValue[i] * float(VREF*1000)/maxVal/10; // K
+        break;
+      case 2:
+        //analogReference() // Check safety concerns first
+        sensorValue[i]=analogRead(i);
+        sensorTemp[i]=(sensorValue[i] * float(VREF*1000)/maxVal-500)/10+273.15; // K
+        break;
+      case 3:
+        break;
+    }
+  }
+
+  //Convert Kelvin to anything else
+  for(int i=0;i<8;i++){
+    switch (SCALE) {
+      case 0:
+        break;
+      case 1:
+        sensorTemp[i]=sensorTemp[i]-273;
+        break;
+      case 2:
+        sensorTemp[i]=(float(sensorTemp[i]) - 273.15) * 1.8 + 32;
+        break;
+      case 3:
+        Serial.println("Rankine is dumb, so are you");
+        break;
+    }
+  }
+
+  
+  // Print results
+  for(int i=0;i<8;i++){
+    if(i!=0){
+      Serial.print("\t");
+    }
+    Serial.print("T");
+    Serial.print(i);
+    Serial.print("=");
+    if(SensorType[i]==0){
+      Serial.print("NA");
+    }
+    else{
+      Serial.print(sensorTemp[i]);
+    }
+  }
+  Serial.print("\n");
+
+  delay(200);
+}
