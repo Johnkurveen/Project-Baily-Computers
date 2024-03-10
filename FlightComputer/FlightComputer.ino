@@ -207,7 +207,6 @@ void loopGps() {
 }
 
 void loopImu() {
-  sensors_event_t accel, mag, gyro, temp;
   lsm.getEvent(&accel, &mag, &gyro, &temp);
 
   imuLog.print(getTimeString()); imuLog.print(",");
