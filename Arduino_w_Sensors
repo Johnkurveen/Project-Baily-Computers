@@ -1,0 +1,141 @@
+//Code for TVAC Arduino Nano. Runs up to 8 analog sensors and displays to a laptop through USB
+//NOTE: Be sure to enable timestamp on serial output
+
+
+//To-Do
+//Add Pressure sensor (I2C)
+//Add thermisters as a sensor type (requires calibration curves and whatnot) (Only if these are valuable in flight)
+//Calibrate LM335s? Should be good to -55C at least, so best for chamber temp. Could do with calibration (pot)
+//Increase resolution by switching to external 3.3V reference? Or internal references
+
+#include "Adafruit_BMP3XX.h"
+#include "Adafruit_LSM9DS1.h"
+
+#define BITS 10  // 12 probably not available on Nano
+#define SCALE 2  // Temperature scales 0=K, 1=C, 2=F, 3=R
+#define VREF 5   // go to 3.3 for higher precision?
+
+
+//int analogPins[] = {0, 1, 2, 3, 6, 7}; // avoid analog pins 4 and 6 as they are used in some serial protocols
+
+Adafruit_LSM9DS1 lsm = Adafruit_LSM9DS1();
+Adafruit_BMP3XX bmp;
+
+unsigned int maxVal = pow(2, BITS);
+
+unsigned short SensorType[] = { 1, 2, 0, 0, 0, 0, 0, 0 };  // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister
+int sensorValue[] = { 0, 0, 0, 0, 0, 0, 0, 0 };            // Sensor reading
+int sensorTemp[] = { 0, 0, 0, 0, 0, 0, 0, 0 };             // temperature read. Starts as K, may be converted.
+
+
+void setup() {
+  // initialize serial communications at 9600 bps:
+  Serial.begin(9600);
+  if (!bmp.begin_I2C())
+  {
+    Serial.print("Failed to start BMP reading");
+  }
+  if (!lsm.begin())
+  {
+    Serial.print("Failed to start LSM reading");
+  }
+  lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_2G);
+  //lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_4G);
+  //lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_8G);
+  //lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_16G);
+  lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
+  //lsm.setupMag(lsm.LSM9DS1_MAGGAIN_8GAUSS);
+  //lsm.setupMag(lsm.LSM9DS1_MAGGAIN_12GAUSS);
+  //lsm.setupMag(lsm.LSM9DS1_MAGGAIN_16GAUSS);
+  lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
+  //lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_500DPS);
+  //lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_2000DPS);
+}
+
+void loop() {
+  // Read sensors, save temp as Kelvin
+  for (int i = 0; i < 8; i++) {
+    //sensorValue[i]=analogRead(i);
+
+    switch (SensorType[i]) {
+      case 0:
+        sensorTemp[i] = 0;
+        break;
+      case 1:  // LM335
+        //analogReference() // Check safety concerns first
+        sensorValue[i] = analogRead(i);                                     //Outputs 0V at 0K, 3V at room temp
+        sensorTemp[i] = sensorValue[i] * float(VREF * 1000) / maxVal / 10;  // K
+        break;
+      case 2:  // TMP36
+        //analogReference() // Check safety concerns first
+        sensorValue[i] = analogRead(i);                                                      // Outputs 0V at -50C, 0.75V @ room temp
+        sensorTemp[i] = (sensorValue[i] * float(VREF * 1000) / maxVal - 500) / 10 + 273.15;  // K
+        break;
+      case 3:  // Thermister, requires design and calibration
+        break;
+    }
+  }
+  bmp.performReading();
+  sensors_event_t accel, mag, gyro, temp;
+  lsm.getEvent(&accel, &mag, &gyro, &temp);
+
+  //Convert Kelvin to anything else
+  for (int i = 0; i < 8; i++) {
+    switch (SCALE) {
+      case 0:
+        break;
+      case 1:
+        sensorTemp[i] = sensorTemp[i] - 273;
+        break;
+      case 2:
+        sensorTemp[i] = (float(sensorTemp[i]) - 273.15) * 1.8 + 32;
+        break;
+      case 3:
+        Serial.println("Rankine is dumb, so are you");
+        break;
+    }
+  }
+
+
+  // Print results
+  // for (int i = 0; i < 8; i++) {
+  //   if (i != 0) {
+  //     Serial.print("\t");
+  //   }
+  //   Serial.print("T");
+  //   Serial.print(i);
+  //   Serial.print("=");
+  //   if (SensorType[i] == 0) {
+  //     Serial.print("NA");
+  //   } else {
+  //     Serial.print(sensorTemp[i]);
+  //   }
+  // }
+  Serial.print(" BMP temperature: ");
+  Serial.print(bmp.temperature);
+  Serial.print(" BMP pressure = ");
+  Serial.print(bmp.pressure/100);
+  Serial.print("\n");
+  Serial.print(" XYZ acceleration: ");
+  Serial.print(accel.acceleration.x);
+  Serial.print(", ");
+  Serial.print(accel.acceleration.y);
+  Serial.print(", ");
+  Serial.print(accel.acceleration.z);
+  Serial.print(" XYZ magnetometer: ");
+  Serial.print(mag.magnetic.x);
+  Serial.print(", ");
+  Serial.print(mag.magnetic.y);
+  Serial.print(", ");
+  Serial.print(mag.magnetic.z);
+  Serial.print(" XYZ Gyro: ");
+  Serial.print(gyro.gyro.x);
+  Serial.print(", ");
+  Serial.print(gyro.gyro.y);
+  Serial.print(", ");
+  Serial.print(gyro.gyro.z);
+  Serial.print(" LSM Temp: ");
+  Serial.print(temp.temperature);
+
+  delay(200);  // Make multiple seconds for operational code
+}
