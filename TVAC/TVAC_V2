@@ -1,10 +1,11 @@
 //Code for TVAC Arduino Nano. Runs up to 8 analog sensors and displays to a laptop through USB
 //NOTE: Be sure to enable timestamp on serial output
-//NOTE: This code was not run after writing it.
+//NOTE: This code was not run after writing it. It does compile.
+//Q: Will it run with I2C not connected? 
 
 //To-Do
-//Add Pressure sensor (I2C. Done, make sure it's wired
-//Add data smoothing
+//Add Pressure sensor (Done!)
+//Add data smoothing  (Done!)
 //Add thermisters as a sensor type (requires calibration curves and whatnot) (Only if these are valuable in flight)
 //Calibrate LM335s? Should be good to -55C at least, so best for chamber temp. Could do with calibration (pot)
 //Increase resolution by switching to external 3.3V reference? Or internal references
@@ -23,7 +24,7 @@ Adafruit_BMP3XX bmp;
 
 unsigned int maxVal = pow(2, BITS);
 
-unsigned short SensorType[] = { 1, 2, 0, 0, 0, 5, 5, 0, 4};  // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister, 4 = BMP, 5 = reserved
+unsigned short SensorType[] = { 1, 2, 0, 0, 0, 5, 5, 0, 4};    // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister, 4 = BMP390, 5 = reserved
 //int sensorValue[SENSORCOUNT] = {};                           // Sensor reading
 float sensorTemp[SENSORCOUNT] = {};                            // temperature read. Starts as K, may be converted
 float sensorPressure=0;
@@ -121,10 +122,6 @@ void loop() {
 
 
   }
-
-
-
-  
   
   delay(100);  //Run at 10Hz, averaging data, displaying the result at 1Hz
 }
