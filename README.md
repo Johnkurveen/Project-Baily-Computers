@@ -1,17 +1,15 @@
-# Saros_Balloon_Computers
-Code for the balloons launching into the eclipse as part of Project Saros. 
+# Project Baily Computers
+Code for the balloons launching into the eclipse as part of Project Baily. Name may change
 
 
-Two possible configurations exist:
-1. Heater code is loaded on a separate computer
-   A. One computer logs sensors, the other is dedicated for controlling heaters using sensors
-   B. This makes logging data from the operational temperatures more difficult
-2. The main flight computer operates both data logging and control of heaters and sensors
-   A. This makes one computer for everything
-   B. Pin counts could be a limitation
-   C. Software crashing could lead to heaters failing
+Heater code is loaded on a separate computer
+   A. One computer logs sensors, the other is dedicated to controlling heaters using sensors
+   B. Sensors for the heat control run wires to both computers. One logs the data, the other uses it for control without logging.
+   C. The purpose is to make sure a software bug in the data logger doesn't disable heating 
+   
+This heat computer may be removed at a later date but active heating seems likely at this time. 
+   
 
-Proposing option 2. One computer
 
 Software general layout: 
 Main loop operating these functions:
