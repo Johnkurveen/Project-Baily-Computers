@@ -1,0 +1,105 @@
+//Code for heater Arduino Nano. Runs up to 8 analog sensors and 8 digital output pins (for MOSFETS driving heaters) and displays to a laptop through USB durring test
+//NOTE: Be sure to enable timestamp on serial output in test mode
+// Status: Code compiles and uploads, but not run with hardware attached
+
+
+//To-Do
+//Add thermisters as a sensor type (requires calibration curves and whatnot) (Only if these are valuable in flight)
+//Test with hardware! 
+//Check that output pins make sense
+//Add fault detection?
+
+
+#define BITS 10  // 12 probably not available on Nano
+//#define SCALE 1  // Temperature scales 0=K, 1=C, 2=F, 3=R
+#define VREF 5   // go to 3.3 for higher precision?
+#define SENSORCOUNT 8 // 8 analog max
+
+
+
+unsigned int maxVal = pow(2, BITS);
+
+unsigned short SensorType[] = { 1, 2, 0, 0, 5, 5, 0, 0};    // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister, 4 = BMP390, 5 = reserved
+short setPoint[] = { 10, 10, 30, -20, 0, 0, 0, 0};          // Input as Celsius
+unsigned short setPointType[] = { 0, 1, 0, 0, 0, 0, 0, 0};  // 0 = Disable, 1 = Enable
+//int sensorValue[SENSORCOUNT] = {};                        // Sensor reading
+float sensorTemp[SENSORCOUNT] = {};                         // temperature read. Leave as K
+bool serialStatus = 1;                                      // 0 Disable, 1 Enable. Measure this instead?
+unsigned short pinsOut[] = { 2, 3, 4, 5, 6, 7, 8, 9};       // Could use PWM from a few pins
+
+
+
+unsigned short n=0; // To count loops
+
+void setup() {
+  // initialize serial communications at 9600 bps:
+  Serial.begin(9600); 
+
+
+}
+
+void loop() {
+  
+  // Read sensors, save temp as Kelvin
+  for (int i = 0; i < SENSORCOUNT; i++) {
+    //sensorValue[i]=analogRead(i);
+
+    switch (SensorType[i]) {
+      case 0:
+      case 5:
+        //sensorTemp[i] = 0;
+        break;
+      case 1:  // LM335
+        //analogReference() // Check safety concerns first
+        //sensorValue[i] = analogRead(i);                                     //Outputs 0V at 0K, 3V at room temp
+        sensorTemp[i] = (sensorTemp[i]*n + (analogRead(i) * float(VREF * 1000) / maxVal / 10))/float(n+1);  // K
+        break;
+      case 2:  // TMP36
+        //analogReference() // Check safety concerns first
+        //sensorValue[i] = analogRead(i);                                     // Outputs 0V at -50C, 0.75V @ room temp
+        sensorTemp[i] = (sensorTemp[i]*n + ((analogRead(i) * float(VREF * 1000) / maxVal - 500) / 10 + 273.15))/float(n+1);  // K
+        break;
+      case 3:  // Thermister, requires design and calibration
+        break;
+    }
+  }
+  
+  n++; //Counts loops
+  n=n%10;
+
+  if(n==0){ // Process data and display at 1Hz
+    //Heat output
+    for (int i = 0; i < SENSORCOUNT; i++) {
+      if (((sensorTemp[i]-273.15) < setPoint[i]) && (setPointType[i]==1)){
+        digitalWrite(pinsOut[i], HIGH);
+      }
+      else if ((sensorTemp[i]-273.15) > (setPoint[i]+5)){
+        digitalWrite(pinsOut[i], LOW);
+      }
+    }
+
+    
+    //Print results, not needed in flight
+    if(serialStatus){
+      for (int i = 0; i < SENSORCOUNT; i++) {
+        if (i != 0) {
+          Serial.print("\t"); // Tab helps columns align
+        }
+        
+        Serial.print("T"); //T0=25.18 is an excample of the result
+        Serial.print(i);
+        Serial.print("=");
+        if (SensorType[i] == 0 || SensorType[i] == 5) { //NA for missing or reserved sensors
+          Serial.print("NA");
+        } else {
+          Serial.print(sensorTemp[i] - 273.15);
+        }
+      }
+    
+    Serial.print("\n");   
+    
+    }
+  }
+  
+  delay(100);  //Run at 10Hz, averaging data, displaying the result at 1Hz
+}
