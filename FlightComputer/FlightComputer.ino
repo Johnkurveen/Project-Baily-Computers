@@ -5,16 +5,30 @@
 #include <Adafruit_GPS.h>
 #include <Adafruit_BMP3XX.h>
 #include <Adafruit_LSM9DS1.h>
+#include <Adafruit_ADS1X15.h>
 #include <SD.h>
+
+#include "Average.hpp"
 
 // what's the name of the hardware serial port?
 #define GPSSerial Serial1
 #define SDCardSelect 4
 
+static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
+static constexpr uint32_t LOOPS_PER_1HZ { 200 };
+static constexpr uint32_t LOOPS_PER_40HZ { 5 };
+static constexpr uint32_t GPS_MESSAGE_WAIT_MILLISECONDS { 250 };
+static constexpr int IMU_LOGGING_DIGITS { 8 };
+static constexpr adsGain_t ADC_GAIN { GAIN_TWO };
+static constexpr size_t ADC_CHANNEL_COUNT { 4 };
+static constexpr int ADC_LOGGING_DIGITS { 8 };
+
 // Connect to the GPS on the hardware port
 Adafruit_GPS gps {&GPSSerial};
 Adafruit_LSM9DS1 lsm {};
 Adafruit_BMP3XX bmp {};
+Adafruit_ADS1115 giraffe {};
+Adafruit_ADS1115 zebra {};
 
 sensors_event_t accel {};
 sensors_event_t mag {};
@@ -29,10 +43,8 @@ uint32_t lastLoop { 0 };
 uint32_t lastParsedMessage { 0 };
 bool newMessage { false };
 
-static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
-static constexpr uint32_t LOOPS_PER_1HZ { 200 };
-static constexpr uint32_t GPS_MESSAGE_WAIT_MILLISECONDS { 250 };
-static constexpr int IMU_LOGGING_DIGITS { 8 };
+Average<float> giraffeAverages[ADC_CHANNEL_COUNT];
+Average<float> zebraAverages[ADC_CHANNEL_COUNT];
 
 void error() {
   while (true) {
@@ -112,6 +124,12 @@ void setup() {
   lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
   lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
 
+  giraffe.begin(0x48); // ADDR = GND
+  zebra.begin(0x49); // ADDR = VIN
+
+  giraffe.setGain(ADC_GAIN);
+  zebra.setGain(ADC_GAIN);
+
   delay(1000);
 
   gpsLog.print("hour,");
@@ -130,7 +148,15 @@ void setup() {
   log1Hz.print("y_magnetometer,");
   log1Hz.print("z_magnetometer,");
   log1Hz.print("temperature,");
-  log1Hz.print("pressure");
+  log1Hz.print("pressure,");
+  log1Hz.print("giraffe_0,");
+  log1Hz.print("giraffe_1,");
+  log1Hz.print("giraffe_2,");
+  log1Hz.print("giraffe_3,");
+  log1Hz.print("zebra_0,");
+  log1Hz.print("zebra_1,");
+  log1Hz.print("zebra_2,");
+  log1Hz.print("zebra_3");
   log1Hz.println();
 
   imuLog.print("time,");
@@ -177,15 +203,6 @@ void loopGps() {
     if (!gps.parse(gps.lastNMEA())) {
       return;
     }
-    // gps.
-    // timeSync.localTime = millis();
-    // timeSync.gps.hour = gps.hour;
-    // timeSync.gps.minute = gps.minute;
-    // timeSync.gps.seconds = gps.seconds;
-    // timeSync.gps.milliseconds = gps.milliseconds;
-    // timeSync.gps.year = gps.year;
-    // timeSync.gps.month = gps.month;
-    // timeSync.gps.day = gps.day;
     lastParsedMessage = millis();
     newMessage = true;
   }
@@ -218,6 +235,15 @@ void loopImu() {
   imuLog.print(gyro.gyro.z, IMU_LOGGING_DIGITS); imuLog.println();
 }
 
+void loop40Hz() {
+  static size_t loopCounter { 0 };
+
+  giraffeAverages[loopCounter].insert(giraffe.computeVolts(giraffe.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
+  zebraAverages[loopCounter].insert(zebra.computeVolts(zebra.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
+
+  loopCounter = (loopCounter + 1) % 4;
+}
+
 void loop1Hz() {
   bmp.performReading();
 
@@ -226,7 +252,19 @@ void loop1Hz() {
   log1Hz.print(mag.magnetic.y, IMU_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(mag.magnetic.z, IMU_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(bmp.temperature); log1Hz.print(",");
-  log1Hz.print(bmp.pressure); log1Hz.println();
+  log1Hz.print(bmp.pressure); log1Hz.print(",");
+  for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
+    log1Hz.print(giraffeAverages[i].get(), ADC_LOGGING_DIGITS);
+    log1Hz.print(",");
+  }
+  for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
+    log1Hz.print(zebraAverages[i].get(), ADC_LOGGING_DIGITS);
+    if (i != (ADC_CHANNEL_COUNT - 1)) {
+      log1Hz.print(",");
+    } else {
+      log1Hz.println();
+    }
+  }
 
   log1Hz.flush();
   imuLog.flush();
@@ -234,14 +272,17 @@ void loop1Hz() {
 
 void loop() {
   static uint32_t loopCounter { 0 };
-  loopCounter = (loopCounter + 1) % LOOPS_PER_1HZ;
 
   loopImu();
   loopGps();
-  if ((loopCounter % LOOPS_PER_1HZ) == 0) {
+  if ((loopCounter % LOOPS_PER_40HZ) == (LOOPS_PER_40HZ - 1)) {
+    loop40Hz();
+  }
+  if ((loopCounter % LOOPS_PER_1HZ) == (LOOPS_PER_1HZ - 1)) {
     loop1Hz();
   }
 
+  loopCounter = (loopCounter + 1) % LOOPS_PER_1HZ;
   lastLoop += LOOP_PERIOD_MICROSECONDS;
   while (static_cast<int32_t>(micros() - lastLoop) < 0) {
     // Busy loop until it is time for the next cycle
