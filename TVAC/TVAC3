@@ -1,0 +1,138 @@
+//Code for TVAC Arduino Nano. Runs up to 8 analog sensors and displays to a laptop through USB
+//NOTE: Be sure to enable timestamp on serial output
+//Status: Added pressure sensor, improved outputs to CSV standard
+
+//To-Do
+//Add Pressure sensor (Done!) Not needed to run
+//Add data smoothing  (Done!) (Now at any speed!)
+//Add time display in minutes (Done!)
+//Add thermisters as a sensor type (requires calibration curves and whatnot) (Only if these are valuable in flight)
+//Calibrate LM335s? Should be good to -55C at least, so best for chamber temp. Could do with calibration (pot)
+//Increase resolution by switching to external 3.3V reference? Or internal references
+
+#include "Adafruit_BMP3XX.h"
+#include "MS5611.h"
+
+#define BITS 10  // 12 probably not available on Nano
+#define SCALE 1  // Temperature scales 0=K, 1=C, 2=F, 3=R
+#define VREF 5   // go to 3.3 for higher precision?
+#define SENSORCOUNT 9 // 8 analog and 1 I2C
+#define SAMPLERATE 100 // Run at 100Hz, averaging data, always printing at 1Hz.
+
+
+//int analogPins[] = {0, 1, 2, 3, 6, 7}; // avoid analog pins 4 and 5 as they are used in I2C
+
+Adafruit_BMP3XX bmp; //May not be able to do bmp and MS5611?
+MS5611 MS5611(0x77);
+
+unsigned int maxVal = pow(2, BITS);
+
+unsigned short SensorType[] = { 2, 2, 2, 2, 5, 5, 1, 2, 6};    // Sensor types: 0 = Unused, 1 = LM335, 2 = TMP36, 3 = TBD Thermister, 4 = BMP390, 5 = reserved, 6 = ms5611 (0x77)
+//int sensorValue[SENSORCOUNT] = {};                           // Sensor reading
+float sensorTemp[SENSORCOUNT] = {};                            // temperature read. Starts as K, may be converted
+float sensorPressure=0;
+
+unsigned short n=0; // To count loops
+bool I2CStat;
+
+void setup() {
+  // initialize serial communications at 9600 bps:
+  Serial.begin(9600);
+  Serial.println("New Run");
+  
+  if (!MS5611.begin()){
+    Serial.print("Failed to start MS5611 reading\n");
+    I2CStat=0;
+    //bmp.temperature=0;
+  }
+  else{
+    I2CStat=1;
+  }
+  Serial.println(",time,,T0,,T1,,T2,,T3,,T4,,T5,,T6,,T7,,T8,,Pa");
+}
+
+void loop() {
+  //Serial.print("test3");
+  // Read sensors, save temp as Kelvin
+  for (int i = 0; i < SENSORCOUNT; i++) {
+    //sensorValue[i]=analogRead(i);
+
+    switch (SensorType[i]) {
+      case 0:
+      case 5:
+        //sensorTemp[i] = 0;
+        break;
+      case 1:  // LM335
+        //analogReference() // Check safety concerns first
+        //sensorValue[i] = analogRead(i);                                     //Outputs 0V at 0K, 3V at room temp
+        sensorTemp[i] = (sensorTemp[i]*n + (analogRead(i) * float(VREF * 1000) / maxVal / 10)-4)/float(n+1);  // K. Offset by 4K per calibration
+        break;
+      case 2:  // TMP36
+        //analogReference() // Check safety concerns first
+        //sensorValue[i] = analogRead(i);                                     // Outputs 0V at -50C, 0.75V @ room temp
+        sensorTemp[i] = (sensorTemp[i]*n + ((analogRead(i) * float(VREF * 1000) / maxVal - 500) / 10 + 273.15))/float(n+1);  // K
+        break;
+      case 3:  // Thermister, requires design and calibration
+        break;
+      case 4:  // BMP sensor, I2C. Reports in C? Only get one.
+        bmp.performReading();
+        sensorTemp[i] = (sensorTemp[i]*n + (bmp.temperature + 273.15))/float(n+1);
+        sensorPressure = (sensorPressure*n + bmp.pressure)/float(n+1);
+        break;
+      case 6:  // MS5611 sensor, I2C. Reports in C. Second one can have different address
+        MS5611.read();
+        sensorTemp[i] = (sensorTemp[i]*n + (MS5611.getTemperature() + 273.15))/float(n+1);
+        sensorPressure = (sensorPressure*n + MS5611.getPressure()*100)/float(n+1); // save as Pa
+        break;
+        
+    }
+  }
+  
+  n++; //Counts loops
+  n=n%SAMPLERATE;
+
+  if(n==0){ // Process data and display at 1Hz
+    //Convert Kelvin to anything else
+    for (int i = 0; i < SENSORCOUNT; i++) {
+      switch (SCALE) {
+        case 0:
+          break;
+        case 1:
+          sensorTemp[i] = sensorTemp[i] - 273.15;
+          break;
+        case 2:
+          sensorTemp[i] = (float(sensorTemp[i]) - 273.15) * 1.8 + 32;
+          break;
+        case 3:
+          Serial.println("Rankine is dumb, so are you");
+          break;
+      }
+    }
+
+    //Print results
+    Serial.print("time,");
+    Serial.print(float(millis())/60000); //print minutes since program started as a float
+    for (int i = 0; i < SENSORCOUNT; i++) {
+      Serial.print(",   T"); //T0=09.18 is an example of the result
+      Serial.print(i);
+      Serial.print(",");
+      if (SensorType[i] == 0 || SensorType[i] == 5) { //NA for missing or reserved sensors
+        Serial.print("NA");
+      } else {
+        if (sensorTemp[i]<10 && sensorTemp[i]>0){
+          Serial.print('0');
+        }
+        Serial.print(sensorTemp[i]);
+      }
+    }
+    if (I2CStat){
+      Serial.print(", Pa,");
+      Serial.print(sensorPressure); // kPa
+    }
+    Serial.print("\n");   
+
+
+  }
+  
+  delay(1000/SAMPLERATE);  //Run at 100Hz, averaging data, displaying the result at 1Hz
+}
