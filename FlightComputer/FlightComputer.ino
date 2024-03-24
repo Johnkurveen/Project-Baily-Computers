@@ -3,12 +3,16 @@
 // Requires https://adafruit.github.io/arduino-board-index/package_adafruit_index.json in Settings > Additional Board Manager URLs
 
 #include <Adafruit_GPS.h>
-#include <Adafruit_BMP3XX.h>
 #include <Adafruit_LSM9DS1.h>
 #include <Adafruit_ADS1X15.h>
+#include <MS5611.h>
 #include <SD.h>
 
 #include "Average.hpp"
+
+// Comment these out to disable specific ADCs
+// #define INCLUDE_GIRAFFE
+#define INCLUDE_ZEBRA
 
 // what's the name of the hardware serial port?
 #define GPSSerial Serial1
@@ -22,13 +26,21 @@ static constexpr int IMU_LOGGING_DIGITS { 8 };
 static constexpr adsGain_t ADC_GAIN { GAIN_TWO };
 static constexpr size_t ADC_CHANNEL_COUNT { 4 };
 static constexpr int ADC_LOGGING_DIGITS { 8 };
+static constexpr int MS5611_LOGGING_DIGITS { 8 };
+static constexpr uint32_t LED_PIN { 5 };
 
 // Connect to the GPS on the hardware port
-Adafruit_GPS gps {&GPSSerial};
+Adafruit_GPS gps { &GPSSerial };
 Adafruit_LSM9DS1 lsm {};
-Adafruit_BMP3XX bmp {};
+MS5611 ms5611 { 0x77 };
+#ifdef INCLUDE_GIRAFFE
 Adafruit_ADS1115 giraffe {};
+Average<float> giraffeAverages[ADC_CHANNEL_COUNT];
+#endif
+#ifdef INCLUDE_ZEBRA
 Adafruit_ADS1115 zebra {};
+Average<float> zebraAverages[ADC_CHANNEL_COUNT];
+#endif
 
 sensors_event_t accel {};
 sensors_event_t mag {};
@@ -38,19 +50,25 @@ sensors_event_t temp {};
 File gpsLog;
 File log1Hz;
 File imuLog;
+File diagnosticLog;
 
 uint32_t lastLoop { 0 };
 uint32_t lastParsedMessage { 0 };
 bool newMessage { false };
 
-Average<float> giraffeAverages[ADC_CHANNEL_COUNT];
-Average<float> zebraAverages[ADC_CHANNEL_COUNT];
-
-void error() {
+void halt(char const* message, char const* message2) {
+  if (diagnosticLog) {
+    diagnosticLog.print(message);
+    diagnosticLog.println(message2);
+  }
   while (true) {
-    Serial.println("Error");
+    Serial.print(message);
+    Serial.println(message2);
     delay(1000);
   }
+}
+void halt(char const* message) {
+  halt("", message);
 }
 
 void setup() {
@@ -60,9 +78,9 @@ void setup() {
   // }
 
   if (!SD.begin(SDCardSelect)) {
-    Serial.println("Card init. failed!");
-    error();
+    halt("SD Card initialization failed!");
   }
+
   char filename[32];
   strcpy(filename, "/LOGS0000");
   for (uint8_t i = 0; i < 10000; i++) {
@@ -75,60 +93,67 @@ void setup() {
       break;
     }
   }
+
   if (!SD.mkdir(filename)) {
-    Serial.print("Couldnt create "); 
-    Serial.println(filename);
-    error();
+    halt("Couldn't create ", filename);
   }
+
+  strcpy(&filename[9], "/DIAGNOSTIC.LOG");
+  diagnosticLog = SD.open(filename, FILE_WRITE);
 
   strcpy(&filename[9], "/GPS.CSV");
   gpsLog = SD.open(filename, FILE_WRITE);
   if( ! gpsLog ) {
-    Serial.print("Couldnt create "); 
-    Serial.println(filename);
-    error();
+    halt("Couldn't create ", filename);
   }
 
   strcpy(&filename[9], "/1HZ.CSV");
   log1Hz = SD.open(filename, FILE_WRITE);
   if( ! log1Hz ) {
-    Serial.print("Couldnt create "); 
-    Serial.println(filename);
-    error();
+    halt("Couldn't create ", filename);
   }
 
   strcpy(&filename[9], "/IMU.CSV");
   imuLog = SD.open(filename, FILE_WRITE);
   if( ! imuLog ) {
-    Serial.print("Couldnt create "); 
-    Serial.println(filename);
-    error();
+    halt("Couldn't create ", filename);
   }
 
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
-  gps.begin(9600);
+  if (!gps.begin(9600)) {
+    halt("Failed to start GPS");
+  }
 
   // Get all the data 5 times per second
   gps.sendCommand(PMTK_SET_NMEA_OUTPUT_ALLDATA);
   gps.sendCommand(PMTK_SET_NMEA_UPDATE_100_MILLIHERTZ);
-  
-  if (!bmp.begin_I2C())
-  {
-    Serial.print("Failed to start BMP reading");
-  }
+
   if (!lsm.begin())
   {
-    Serial.print("Failed to start LSM reading");
+    halt("Failed to start LSM");
   }
   lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_2G);
   lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
   lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
 
-  giraffe.begin(0x48); // ADDR = GND
-  zebra.begin(0x49); // ADDR = VIN
-
+#ifdef INCLUDE_GIRAFFE
+  if (!giraffe.begin(0x48)) { // ADDR = GND
+    halt("Failed to start Giraffe");
+  }
   giraffe.setGain(ADC_GAIN);
+#endif
+#ifdef INCLUDE_ZEBRA
+  if (!zebra.begin(0x49)) { // ADDR = VIN
+    halt("Failed to start Zebra");
+  }
   zebra.setGain(ADC_GAIN);
+#endif
+
+  if (!ms5611.begin()){
+    halt("Failed to start MS5611");
+  }
+
+  pinMode(LED_PIN, OUTPUT); // Enable LED output pin
 
   delay(1000);
 
@@ -147,16 +172,20 @@ void setup() {
   log1Hz.print("x_magnetometer,");
   log1Hz.print("y_magnetometer,");
   log1Hz.print("z_magnetometer,");
-  log1Hz.print("temperature,");
-  log1Hz.print("pressure,");
-  log1Hz.print("giraffe_0,");
-  log1Hz.print("giraffe_1,");
-  log1Hz.print("giraffe_2,");
-  log1Hz.print("giraffe_3,");
-  log1Hz.print("zebra_0,");
-  log1Hz.print("zebra_1,");
-  log1Hz.print("zebra_2,");
-  log1Hz.print("zebra_3");
+  log1Hz.print("ms5611_temperature,");
+  log1Hz.print("ms5611_pressure");
+#ifdef INCLUDE_GIRAFFE
+  log1Hz.print(",giraffe_0");
+  log1Hz.print(",giraffe_1");
+  log1Hz.print(",giraffe_2");
+  log1Hz.print(",giraffe_3");
+#endif
+#ifdef INCLUDE_ZEBRA
+  log1Hz.print(",zebra_0");
+  log1Hz.print(",zebra_1");
+  log1Hz.print(",zebra_2");
+  log1Hz.print(",zebra_3");
+#endif
   log1Hz.println();
 
   imuLog.print("time,");
@@ -167,6 +196,9 @@ void setup() {
   imuLog.print("y_gyro,");
   imuLog.print("z_gyro");
   imuLog.println();
+
+  diagnosticLog.println("Initialized Successfully");
+  Serial.println("Initialized Successfully");
 
   lastLoop = micros();
 }
@@ -238,33 +270,43 @@ void loopImu() {
 void loop40Hz() {
   static size_t loopCounter { 0 };
 
+#ifdef INCLUDE_GIRAFFE
   giraffeAverages[loopCounter].insert(giraffe.computeVolts(giraffe.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
+#endif
+#ifdef INCLUDE_ZEBRA
   zebraAverages[loopCounter].insert(zebra.computeVolts(zebra.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
+#endif
 
   loopCounter = (loopCounter + 1) % 4;
 }
 
 void loop1Hz() {
-  bmp.performReading();
+  static bool blinkState { false };
+
+  blinkState = !blinkState;
+  digitalWrite(LED_PIN, blinkState ? HIGH : LOW);
+
+  ms5611.read();
 
   log1Hz.print(getTimeString()); log1Hz.print(",");
   log1Hz.print(mag.magnetic.x, IMU_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(mag.magnetic.y, IMU_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(mag.magnetic.z, IMU_LOGGING_DIGITS); log1Hz.print(",");
-  log1Hz.print(bmp.temperature); log1Hz.print(",");
-  log1Hz.print(bmp.pressure); log1Hz.print(",");
+  log1Hz.print(ms5611.getTemperature(), MS5611_LOGGING_DIGITS); log1Hz.print(",");
+  log1Hz.print(ms5611.getPressure(), MS5611_LOGGING_DIGITS);
+#ifdef INCLUDE_GIRAFFE
   for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
-    log1Hz.print(giraffeAverages[i].get(), ADC_LOGGING_DIGITS);
     log1Hz.print(",");
+    log1Hz.print(giraffeAverages[i].get(), ADC_LOGGING_DIGITS);
   }
+#endif
+#ifdef INCLUDE_ZEBRA
   for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
+    log1Hz.print(",");
     log1Hz.print(zebraAverages[i].get(), ADC_LOGGING_DIGITS);
-    if (i != (ADC_CHANNEL_COUNT - 1)) {
-      log1Hz.print(",");
-    } else {
-      log1Hz.println();
-    }
   }
+#endif
+  log1Hz.println();
 
   log1Hz.flush();
   imuLog.flush();
