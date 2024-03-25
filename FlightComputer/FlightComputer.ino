@@ -7,12 +7,12 @@
 #include <Adafruit_ADS1X15.h>
 #include <MS5611.h>
 #include <SD.h>
+#include <cmath>
 
 #include "Average.hpp"
 
-// Comment these out to disable specific ADCs
-// #define INCLUDE_GIRAFFE
-#define INCLUDE_ZEBRA
+// Uncomment this to enable calibration mode
+#define THERMISTOR_CALIBRATION
 
 // what's the name of the hardware serial port?
 #define GPSSerial Serial1
@@ -20,27 +20,41 @@
 
 static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
 static constexpr uint32_t LOOPS_PER_1HZ { 200 };
-static constexpr uint32_t LOOPS_PER_40HZ { 5 };
+static constexpr uint32_t LOOPS_PER_100HZ { 2 };
 static constexpr uint32_t GPS_MESSAGE_WAIT_MILLISECONDS { 250 };
 static constexpr int IMU_LOGGING_DIGITS { 8 };
 static constexpr adsGain_t ADC_GAIN { GAIN_TWO };
-static constexpr size_t ADC_CHANNEL_COUNT { 4 };
+static constexpr size_t ANALOG_COUNT { 10 };
 static constexpr int ADC_LOGGING_DIGITS { 8 };
 static constexpr int MS5611_LOGGING_DIGITS { 8 };
 static constexpr uint32_t LED_PIN { 5 };
+static constexpr int ADC_BITS { 12 };
+static constexpr double KELVIN_CELSIUS_OFFSET { 273.15 };
+static constexpr double ADC_VOLTAGE { 3.3 };
+static constexpr double ADC_DIVISOR { static_cast<double>((1 << ADC_BITS) - 1) };
+static constexpr double THERMISTOR_RESISTOR_VALUE {100000};
+static constexpr double THERMISTOR_HIGH_VOLTAGE {3.3};
+static constexpr double STEINHART_HART_CONSTANTS[ANALOG_COUNT][3] {
+  //  A               B               C
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
+  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 }
+};
 
 // Connect to the GPS on the hardware port
 Adafruit_GPS gps { &GPSSerial };
 Adafruit_LSM9DS1 lsm {};
 MS5611 ms5611 { 0x77 };
-#ifdef INCLUDE_GIRAFFE
-Adafruit_ADS1115 giraffe {};
-Average<float> giraffeAverages[ADC_CHANNEL_COUNT];
-#endif
-#ifdef INCLUDE_ZEBRA
 Adafruit_ADS1115 zebra {};
-Average<float> zebraAverages[ADC_CHANNEL_COUNT];
-#endif
+
+Average<double> analogAverages[ANALOG_COUNT];
 
 sensors_event_t accel {};
 sensors_event_t mag {};
@@ -60,6 +74,7 @@ void halt(char const* message, char const* message2) {
   if (diagnosticLog) {
     diagnosticLog.print(message);
     diagnosticLog.println(message2);
+    diagnosticLog.flush();
   }
   while (true) {
     Serial.print(message);
@@ -98,7 +113,7 @@ void setup() {
     halt("Couldn't create ", filename);
   }
 
-  strcpy(&filename[9], "/DIAGNOSTIC.LOG");
+  strcpy(&filename[9], "/DIA.LOG");
   diagnosticLog = SD.open(filename, FILE_WRITE);
 
   strcpy(&filename[9], "/GPS.CSV");
@@ -119,6 +134,10 @@ void setup() {
     halt("Couldn't create ", filename);
   }
 
+  diagnosticLog.println("Attempting to Initialize Hardware");
+  diagnosticLog.flush();
+  Serial.println("Attempting to Initialize Hardware");
+
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
   if (!gps.begin(9600)) {
     halt("Failed to start GPS");
@@ -136,24 +155,17 @@ void setup() {
   lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
   lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
 
-#ifdef INCLUDE_GIRAFFE
-  if (!giraffe.begin(0x48)) { // ADDR = GND
-    halt("Failed to start Giraffe");
-  }
-  giraffe.setGain(ADC_GAIN);
-#endif
-#ifdef INCLUDE_ZEBRA
   if (!zebra.begin(0x49)) { // ADDR = VIN
     halt("Failed to start Zebra");
   }
   zebra.setGain(ADC_GAIN);
-#endif
 
   if (!ms5611.begin()){
     halt("Failed to start MS5611");
   }
 
   pinMode(LED_PIN, OUTPUT); // Enable LED output pin
+  analogReadResolution(ADC_BITS); // Set adc resolution
 
   delay(1000);
 
@@ -174,18 +186,16 @@ void setup() {
   log1Hz.print("z_magnetometer,");
   log1Hz.print("ms5611_temperature,");
   log1Hz.print("ms5611_pressure");
-#ifdef INCLUDE_GIRAFFE
-  log1Hz.print(",giraffe_0");
-  log1Hz.print(",giraffe_1");
-  log1Hz.print(",giraffe_2");
-  log1Hz.print(",giraffe_3");
+  for (size_t i { 0 }; i < ANALOG_COUNT; i++) {
+#ifdef THERMISTOR_CALIBRATION
+    log1Hz.print(",voltage_");
+    log1Hz.print(i);
+    log1Hz.print(",resistance_");
+    log1Hz.print(i);
 #endif
-#ifdef INCLUDE_ZEBRA
-  log1Hz.print(",zebra_0");
-  log1Hz.print(",zebra_1");
-  log1Hz.print(",zebra_2");
-  log1Hz.print(",zebra_3");
-#endif
+    log1Hz.print(",temperature_");
+    log1Hz.print(i);
+  }
   log1Hz.println();
 
   imuLog.print("time,");
@@ -198,6 +208,7 @@ void setup() {
   imuLog.println();
 
   diagnosticLog.println("Initialized Successfully");
+  diagnosticLog.flush();
   Serial.println("Initialized Successfully");
 
   lastLoop = micros();
@@ -267,17 +278,57 @@ void loopImu() {
   imuLog.print(gyro.gyro.z, IMU_LOGGING_DIGITS); imuLog.println();
 }
 
-void loop40Hz() {
+double readAnalogPin(uint32_t pin) {
+  return static_cast<double>(analogRead(pin)) / ADC_DIVISOR * ADC_VOLTAGE;
+}
+
+double readZebraChannel(uint8_t channel) {
+  return static_cast<double>(zebra.computeVolts(zebra.readADC_SingleEnded(channel)));
+}
+
+double readAnalog(size_t channel) {
+  switch (channel) {
+    case 0:
+      return readAnalogPin(A5);
+    case 1:
+      return readAnalogPin(A4);
+    case 2:
+      return readAnalogPin(A3);
+    case 3:
+      return readAnalogPin(A2);
+    case 4:
+      return readAnalogPin(A1);
+    case 5:
+      return readAnalogPin(A0);
+    case 6:
+      return readZebraChannel(3);
+    case 7:
+      return readZebraChannel(2);
+    case 8:
+      return readZebraChannel(1);
+    case 9:
+      return readZebraChannel(0);
+    default:
+      return NAN;
+  }
+  return NAN;
+}
+
+double steinhart_hart(double resistance, double a, double b, double c) {
+  double lnResistance { log(resistance) };
+  return 1.0 / (a + b * lnResistance + c * lnResistance * lnResistance * lnResistance);
+}
+
+double voltage_to_resistance(double voltage) {
+  return THERMISTOR_RESISTOR_VALUE * (THERMISTOR_HIGH_VOLTAGE - voltage) / voltage;
+}
+
+void loop100Hz() {
   static size_t loopCounter { 0 };
 
-#ifdef INCLUDE_GIRAFFE
-  giraffeAverages[loopCounter].insert(giraffe.computeVolts(giraffe.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
-#endif
-#ifdef INCLUDE_ZEBRA
-  zebraAverages[loopCounter].insert(zebra.computeVolts(zebra.readADC_SingleEnded(static_cast<uint8_t>(loopCounter))));
-#endif
+  analogAverages[loopCounter].insert(readAnalog(loopCounter));
 
-  loopCounter = (loopCounter + 1) % 4;
+  loopCounter = (loopCounter + 1) % 10;
 }
 
 void loop1Hz() {
@@ -294,18 +345,19 @@ void loop1Hz() {
   log1Hz.print(mag.magnetic.z, IMU_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(ms5611.getTemperature(), MS5611_LOGGING_DIGITS); log1Hz.print(",");
   log1Hz.print(ms5611.getPressure(), MS5611_LOGGING_DIGITS);
-#ifdef INCLUDE_GIRAFFE
-  for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
+  for (size_t i { 0 }; i < ANALOG_COUNT; i++) {
     log1Hz.print(",");
-    log1Hz.print(giraffeAverages[i].get(), ADC_LOGGING_DIGITS);
-  }
-#endif
-#ifdef INCLUDE_ZEBRA
-  for (size_t i { 0 }; i < ADC_CHANNEL_COUNT; i++) {
+    double voltage { analogAverages[i].get() };
+    double resistance { voltage_to_resistance(voltage) };
+    double temperature { steinhart_hart(resistance, STEINHART_HART_CONSTANTS[i][0], STEINHART_HART_CONSTANTS[i][1], STEINHART_HART_CONSTANTS[i][2]) - KELVIN_CELSIUS_OFFSET };
+#ifdef THERMISTOR_CALIBRATION
+    log1Hz.print(voltage, ADC_LOGGING_DIGITS);
     log1Hz.print(",");
-    log1Hz.print(zebraAverages[i].get(), ADC_LOGGING_DIGITS);
-  }
+    log1Hz.print(resistance, ADC_LOGGING_DIGITS);
+    log1Hz.print(",");
 #endif
+    log1Hz.print(temperature, ADC_LOGGING_DIGITS);
+  }
   log1Hz.println();
 
   log1Hz.flush();
@@ -317,8 +369,8 @@ void loop() {
 
   loopImu();
   loopGps();
-  if ((loopCounter % LOOPS_PER_40HZ) == (LOOPS_PER_40HZ - 1)) {
-    loop40Hz();
+  if ((loopCounter % LOOPS_PER_100HZ) == (LOOPS_PER_100HZ - 1)) {
+    loop100Hz();
   }
   if ((loopCounter % LOOPS_PER_1HZ) == (LOOPS_PER_1HZ - 1)) {
     loop1Hz();
