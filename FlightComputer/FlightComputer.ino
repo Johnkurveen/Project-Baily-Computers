@@ -68,6 +68,7 @@ File diagnosticLog;
 
 uint32_t lastLoop { 0 };
 uint32_t lastParsedMessage { 0 };
+uint32_t loopCounter { 0 };
 bool newMessage { false };
 
 void halt(char const* message, char const* message2) {
@@ -365,18 +366,16 @@ void loop1Hz() {
 }
 
 void loop() {
-  static uint32_t loopCounter { 0 };
-
   loopImu();
   loopGps();
-  if ((loopCounter % LOOPS_PER_100HZ) == (LOOPS_PER_100HZ - 1)) {
+  if (loopCounter % LOOPS_PER_100HZ == 0) { // Run when 100hz rolls over
     loop100Hz();
   }
-  if ((loopCounter % LOOPS_PER_1HZ) == (LOOPS_PER_1HZ - 1)) {
+  if (loopCounter == 0) { // Run every rollover at 1hz
     loop1Hz();
   }
 
-  loopCounter = (loopCounter + 1) % LOOPS_PER_1HZ;
+  loopCounter = (loopCounter + 1) % LOOPS_PER_1HZ; //Set loopcount to roll over at 1hz
   lastLoop += LOOP_PERIOD_MICROSECONDS;
   while (static_cast<int32_t>(micros() - lastLoop) < 0) {
     // Busy loop until it is time for the next cycle
