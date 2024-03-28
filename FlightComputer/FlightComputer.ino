@@ -10,43 +10,27 @@
 #include <cmath>
 
 #include "Average.hpp"
-
-// Uncomment this to enable calibration mode
-#define THERMISTOR_CALIBRATION
+#include "BufferedFile.hpp"
 
 // what's the name of the hardware serial port?
 #define GPSSerial Serial1
 #define SDCardSelect 4
 
+using Decimal = float;
+
+static constexpr uint32_t I2C_CLOCK { 400000 }; // Baseline 100kHz
 static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
 static constexpr uint32_t LOOPS_PER_1HZ { 200 };
 static constexpr uint32_t LOOPS_PER_100HZ { 2 };
-static constexpr uint32_t GPS_MESSAGE_WAIT_MILLISECONDS { 250 };
-static constexpr int IMU_LOGGING_DIGITS { 8 };
 static constexpr adsGain_t ADC_GAIN { GAIN_TWO };
 static constexpr size_t ANALOG_COUNT { 10 };
-static constexpr int ADC_LOGGING_DIGITS { 8 };
-static constexpr int MS5611_LOGGING_DIGITS { 8 };
 static constexpr uint32_t LED_PIN { 5 };
 static constexpr int ADC_BITS { 12 };
-static constexpr double KELVIN_CELSIUS_OFFSET { 273.15 };
-static constexpr double ADC_VOLTAGE { 3.3 };
-static constexpr double ADC_DIVISOR { static_cast<double>((1 << ADC_BITS) - 1) };
-static constexpr double THERMISTOR_RESISTOR_VALUE {100000};
-static constexpr double THERMISTOR_HIGH_VOLTAGE {3.3};
-static constexpr double STEINHART_HART_CONSTANTS[ANALOG_COUNT][3] {
-  //  A               B               C
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 },
-  { 1.122919524e-3, 2.357963107e-4, 0.7559000491e-7 }
-};
+static constexpr Decimal KELVIN_CELSIUS_OFFSET { 273.15 };
+static constexpr Decimal ADC_VOLTAGE { 3.3 };
+static constexpr Decimal ADC_DIVISOR { static_cast<Decimal>((1 << ADC_BITS) - 1) };
+static constexpr Decimal THERMISTOR_RESISTOR_VALUE {100000};
+static constexpr Decimal THERMISTOR_HIGH_VOLTAGE {3.3};
 
 // Connect to the GPS on the hardware port
 Adafruit_GPS gps { &GPSSerial };
@@ -54,27 +38,18 @@ Adafruit_LSM9DS1 lsm {};
 MS5611 ms5611 { 0x77 };
 Adafruit_ADS1115 zebra {};
 
-Average<double> analogAverages[ANALOG_COUNT];
+Average<Decimal> analogAverages[ANALOG_COUNT];
 
-sensors_event_t accel {};
-sensors_event_t mag {};
-sensors_event_t gyro {};
-sensors_event_t temp {};
-
-File gpsLog;
-File log1Hz;
-File imuLog;
+BufferedFile<4096> logFile;
 File diagnosticLog;
 
 uint32_t lastLoop { 0 };
-uint32_t lastParsedMessage { 0 };
-bool newMessage { false };
 
 void halt(char const* message, char const* message2) {
   if (diagnosticLog) {
     diagnosticLog.print(message);
     diagnosticLog.println(message2);
-    diagnosticLog.flush();
+    diagnosticLog.close();
   }
   while (true) {
     Serial.print(message);
@@ -87,7 +62,8 @@ void halt(char const* message) {
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(921600);
+  Wire.setClock(I2C_CLOCK);
   // while (!Serial) {
   //   ; // wait for serial port to connect. Needed for native USB
   // }
@@ -98,7 +74,7 @@ void setup() {
 
   char filename[32];
   strcpy(filename, "/LOGS0000");
-  for (uint8_t i = 0; i < 10000; i++) {
+  for (uint16_t i = 0; i < 10000; i++) {
     filename[5] = '0' + i/1000;
     filename[6] = '0' + (i/100)%10;
     filename[7] = '0' + (i/10)%10;
@@ -116,21 +92,9 @@ void setup() {
   strcpy(&filename[9], "/DIA.LOG");
   diagnosticLog = SD.open(filename, FILE_WRITE);
 
-  strcpy(&filename[9], "/GPS.CSV");
-  gpsLog = SD.open(filename, FILE_WRITE);
-  if( ! gpsLog ) {
-    halt("Couldn't create ", filename);
-  }
-
-  strcpy(&filename[9], "/1HZ.CSV");
-  log1Hz = SD.open(filename, FILE_WRITE);
-  if( ! log1Hz ) {
-    halt("Couldn't create ", filename);
-  }
-
-  strcpy(&filename[9], "/IMU.CSV");
-  imuLog = SD.open(filename, FILE_WRITE);
-  if( ! imuLog ) {
+  strcpy(&filename[9], "/LOG.DAT");
+  logFile = { filename };
+  if( ! logFile ) {
     halt("Couldn't create ", filename);
   }
 
@@ -139,6 +103,7 @@ void setup() {
   Serial.println("Attempting to Initialize Hardware");
 
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
+  // The faster baud rate works
   if (!gps.begin(9600)) {
     halt("Failed to start GPS");
   }
@@ -169,59 +134,18 @@ void setup() {
 
   delay(1000);
 
-  gpsLog.print("hour,");
-  gpsLog.print("minute,");
-  gpsLog.print("seconds,");
-  gpsLog.print("latitude_fixed,");
-  gpsLog.print("longitude_fixed,");
-  gpsLog.print("altitude,");
-  gpsLog.print("speed,");
-  gpsLog.print("fixquality,");
-  gpsLog.print("satellites");
-  gpsLog.println();
-
-  log1Hz.print("time,");
-  log1Hz.print("x_magnetometer,");
-  log1Hz.print("y_magnetometer,");
-  log1Hz.print("z_magnetometer,");
-  log1Hz.print("ms5611_temperature,");
-  log1Hz.print("ms5611_pressure");
-  for (size_t i { 0 }; i < ANALOG_COUNT; i++) {
-#ifdef THERMISTOR_CALIBRATION
-    log1Hz.print(",voltage_");
-    log1Hz.print(i);
-    log1Hz.print(",resistance_");
-    log1Hz.print(i);
-#endif
-    log1Hz.print(",temperature_");
-    log1Hz.print(i);
-  }
-  log1Hz.println();
-
-  imuLog.print("time,");
-  imuLog.print("x_accel,");
-  imuLog.print("y_accel,");
-  imuLog.print("z_accel,");
-  imuLog.print("x_gyro,");
-  imuLog.print("y_gyro,");
-  imuLog.print("z_gyro");
-  imuLog.println();
-
   diagnosticLog.println("Initialized Successfully");
-  diagnosticLog.flush();
+  diagnosticLog.close();
   Serial.println("Initialized Successfully");
 
   lastLoop = micros();
 }
 
-char const* getTimeString() {
-  static char time[128];
-  if (!gps.fix)
-  {
-    time[0] = '\0';
-    return time;
-  }
-  uint32_t offset = static_cast<uint32_t>(gps.secondsSinceTime() * 1000.0);
+void logTime() {
+  static bool everFixed { false };
+  everFixed |= gps.fix;
+
+  uint32_t offset = static_cast<uint32_t>(gps.secondsSinceTime() * 1000);
   uint32_t milliseconds = static_cast<uint32_t>(gps.milliseconds) + offset;
   uint32_t seconds = static_cast<uint32_t>(gps.seconds) + (milliseconds / 1000);
   milliseconds = milliseconds % 1000;
@@ -233,11 +157,32 @@ char const* getTimeString() {
   hour = hour % 24;
   uint32_t month = static_cast<uint32_t>(gps.month);
   uint32_t year = static_cast<uint32_t>(gps.year)+2000;
-  sprintf(time, "%04d-%02d-%02dT%02d:%02d:%02d.%03d", year, month, day, hour, minutes, seconds, milliseconds);
-  return time;
+  if (!everFixed)
+  {
+    milliseconds = 0;
+    seconds = 0;
+    minutes = 0;
+    hour = 0;
+    day = 0;
+    month = 0;
+    year = 0;
+  }
+  logFile.push<uint32_t>(year);
+  logFile.push<uint32_t>(month);
+  logFile.push<uint32_t>(day);
+  logFile.push<uint32_t>(hour);
+  logFile.push<uint32_t>(minutes);
+  logFile.push<uint32_t>(seconds);
+  logFile.push<uint32_t>(milliseconds);
 }
 
 void loopGps() {
+  // This takes no time usually
+  // If an NMEA is received this takes ~17000us
+  static uint32_t lastMessageTime {};
+  static constexpr int32_t MILLIS_TO_WAIT { 1000 };
+  static bool needsToHandleMessage {false};
+
   // Read data from the GPS - this is necessary
   (void)gps.read();
 
@@ -246,47 +191,65 @@ void loopGps() {
     if (!gps.parse(gps.lastNMEA())) {
       return;
     }
-    lastParsedMessage = millis();
-    newMessage = true;
+    needsToHandleMessage = true;
+    lastMessageTime = millis();
   }
 
-  if ((millis() - lastParsedMessage > GPS_MESSAGE_WAIT_MILLISECONDS) && newMessage){
-    newMessage = false;
+  if (needsToHandleMessage && (static_cast<int32_t>(millis() - lastMessageTime) > MILLIS_TO_WAIT)) {
+    needsToHandleMessage = false;
 
-    gpsLog.print(gps.hour); gpsLog.print(",");
-    gpsLog.print(gps.minute); gpsLog.print(",");
-    gpsLog.print(gps.seconds); gpsLog.print(",");
-    gpsLog.print(gps.latitude_fixed); gpsLog.print(",");
-    gpsLog.print(gps.longitude_fixed); gpsLog.print(",");
-    gpsLog.print(gps.altitude, 2); gpsLog.print(",");
-    gpsLog.print(gps.speed, 2); gpsLog.print(",");
-    gpsLog.print(gps.fixquality); gpsLog.print(",");
-    gpsLog.print(gps.satellites); gpsLog.println();
-    gpsLog.flush();
+    logFile.push<uint8_t>(0x10); // GPS Data
+    logFile.push<uint8_t>(gps.hour);
+    logFile.push<uint8_t>(gps.minute);
+    logFile.push<uint8_t>(gps.seconds);
+    logFile.push<int32_t>(gps.latitude_fixed);
+    logFile.push<int32_t>(gps.longitude_fixed);
+    logFile.push<float>(gps.altitude);
+    logFile.push<float>(gps.speed);
+    logFile.push<uint8_t>(gps.fixquality);
+    logFile.push<uint8_t>(gps.satellites);
+
+    logFile.flush();
+  } else {
+    logFile.doWrite();
   }
 }
 
 void loopImu() {
-  lsm.getEvent(&accel, &mag, &gyro, &temp);
+  // This takes ~2000us
+  sensors_event_t accel {};
+  sensors_event_t gyro {};
+  lsm.getAccel().getEvent(&accel);
+  lsm.getGyro().getEvent(&gyro);
 
-  imuLog.print(getTimeString()); imuLog.print(",");
-  imuLog.print(accel.acceleration.x, IMU_LOGGING_DIGITS); imuLog.print(",");
-  imuLog.print(accel.acceleration.y, IMU_LOGGING_DIGITS); imuLog.print(",");
-  imuLog.print(accel.acceleration.z, IMU_LOGGING_DIGITS); imuLog.print(",");
-  imuLog.print(gyro.gyro.x, IMU_LOGGING_DIGITS); imuLog.print(",");
-  imuLog.print(gyro.gyro.y, IMU_LOGGING_DIGITS); imuLog.print(",");
-  imuLog.print(gyro.gyro.z, IMU_LOGGING_DIGITS); imuLog.println();
+  logFile.push<uint8_t>(0x20); // IMU Data
+  logTime();
+  logFile.push<float>(accel.acceleration.x);
+  logFile.push<float>(accel.acceleration.y);
+  logFile.push<float>(accel.acceleration.z);
+  logFile.push<float>(gyro.gyro.x);
+  logFile.push<float>(gyro.gyro.y);
+  logFile.push<float>(gyro.gyro.z);
 }
 
-double readAnalogPin(uint32_t pin) {
-  return static_cast<double>(analogRead(pin)) / ADC_DIVISOR * ADC_VOLTAGE;
+Decimal readAnalogPin(uint32_t pin) {
+  return static_cast<Decimal>(analogRead(pin)) / ADC_DIVISOR * ADC_VOLTAGE;
 }
 
-double readZebraChannel(uint8_t channel) {
-  return static_cast<double>(zebra.computeVolts(zebra.readADC_SingleEnded(channel)));
+void prepareZebraChannel(uint8_t channel) {
+  zebra.startADCReading(MUX_BY_CHANNEL[channel], false);
 }
 
-double readAnalog(size_t channel) {
+Decimal readZebraChannel(uint8_t channel) {
+  (void)channel;
+  while (!zebra.conversionComplete()) {
+    // Intentionally left blank
+  }
+  return static_cast<Decimal>(zebra.computeVolts(zebra.getLastConversionResults()));
+}
+
+Decimal readAnalog(size_t channel) {
+  Decimal result { NAN };
   switch (channel) {
     case 0:
       return readAnalogPin(A5);
@@ -299,85 +262,106 @@ double readAnalog(size_t channel) {
     case 4:
       return readAnalogPin(A1);
     case 5:
+      prepareZebraChannel(3);
       return readAnalogPin(A0);
     case 6:
-      return readZebraChannel(3);
+      result = readZebraChannel(3);
+      prepareZebraChannel(2);
+      break;
     case 7:
-      return readZebraChannel(2);
+      result = readZebraChannel(2);
+      prepareZebraChannel(1);
+      break;
     case 8:
-      return readZebraChannel(1);
+      result = readZebraChannel(1);
+      prepareZebraChannel(0);
+      break;
     case 9:
       return readZebraChannel(0);
     default:
       return NAN;
   }
-  return NAN;
+  return result;
 }
 
-double steinhart_hart(double resistance, double a, double b, double c) {
-  double lnResistance { log(resistance) };
-  return 1.0 / (a + b * lnResistance + c * lnResistance * lnResistance * lnResistance);
+Decimal steinhart_hart(Decimal resistance, Decimal a, Decimal b, Decimal c) {
+  // return resistance;
+  Decimal lnResistance { log(resistance) };
+  return Decimal {1} / (a + b * lnResistance + c * lnResistance * lnResistance * lnResistance);
 }
 
-double voltage_to_resistance(double voltage) {
+Decimal voltage_to_resistance(Decimal voltage) {
+  // return voltage;
   return THERMISTOR_RESISTOR_VALUE * (THERMISTOR_HIGH_VOLTAGE - voltage) / voltage;
 }
 
 void loop100Hz() {
   static size_t loopCounter { 0 };
 
+  // ~2100us worst case
   analogAverages[loopCounter].insert(readAnalog(loopCounter));
 
   loopCounter = (loopCounter + 1) % 10;
 }
 
-void loop1Hz() {
+void loop196() {
+  // ~2900us
+  (void)ms5611.read();
+}
+
+void loop198() {
   static bool blinkState { false };
+  sensors_event_t mag {};
 
   blinkState = !blinkState;
   digitalWrite(LED_PIN, blinkState ? HIGH : LOW);
 
-  ms5611.read();
+  // ~925us
+  lsm.getMag().getEvent(&mag);
 
-  log1Hz.print(getTimeString()); log1Hz.print(",");
-  log1Hz.print(mag.magnetic.x, IMU_LOGGING_DIGITS); log1Hz.print(",");
-  log1Hz.print(mag.magnetic.y, IMU_LOGGING_DIGITS); log1Hz.print(",");
-  log1Hz.print(mag.magnetic.z, IMU_LOGGING_DIGITS); log1Hz.print(",");
-  log1Hz.print(ms5611.getTemperature(), MS5611_LOGGING_DIGITS); log1Hz.print(",");
-  log1Hz.print(ms5611.getPressure(), MS5611_LOGGING_DIGITS);
-  for (size_t i { 0 }; i < ANALOG_COUNT; i++) {
-    log1Hz.print(",");
-    double voltage { analogAverages[i].get() };
-    double resistance { voltage_to_resistance(voltage) };
-    double temperature { steinhart_hart(resistance, STEINHART_HART_CONSTANTS[i][0], STEINHART_HART_CONSTANTS[i][1], STEINHART_HART_CONSTANTS[i][2]) - KELVIN_CELSIUS_OFFSET };
-#ifdef THERMISTOR_CALIBRATION
-    log1Hz.print(voltage, ADC_LOGGING_DIGITS);
-    log1Hz.print(",");
-    log1Hz.print(resistance, ADC_LOGGING_DIGITS);
-    log1Hz.print(",");
-#endif
-    log1Hz.print(temperature, ADC_LOGGING_DIGITS);
-  }
-  log1Hz.println();
-
-  log1Hz.flush();
-  imuLog.flush();
+  // ~500us
+  logFile.push<uint8_t>(0x30); // 1Hz Data
+  logTime();
+  logFile.push<float>(mag.magnetic.x);
+  logFile.push<float>(mag.magnetic.y);
+  logFile.push<float>(mag.magnetic.z);
+  logFile.push<float>(ms5611.getTemperature());
+  logFile.push<float>(ms5611.getPressure());
+  logFile.push<float>(analogAverages[0].get());
+  logFile.push<float>(analogAverages[1].get());
+  logFile.push<float>(analogAverages[2].get());
+  logFile.push<float>(analogAverages[3].get());
+  logFile.push<float>(analogAverages[4].get());
+  logFile.push<float>(analogAverages[5].get());
+  logFile.push<float>(analogAverages[6].get());
+  logFile.push<float>(analogAverages[7].get());
+  logFile.push<float>(analogAverages[8].get());
+  logFile.push<float>(analogAverages[9].get());
 }
 
 void loop() {
   static uint32_t loopCounter { 0 };
 
-  loopImu();
-  loopGps();
+  // We have 5000us to work with
+
+  loopImu(); // This takes ~2000us
+
   if ((loopCounter % LOOPS_PER_100HZ) == (LOOPS_PER_100HZ - 1)) {
+    // This runs every odd loop and takes 2000us
     loop100Hz();
-  }
-  if ((loopCounter % LOOPS_PER_1HZ) == (LOOPS_PER_1HZ - 1)) {
-    loop1Hz();
+  } else {
+    // No more execution may happen on an odd loop
+    if (loopCounter == 196) {
+      loop196(); // This takes ~3000us - no more execution may happen (~5000 total)
+    } else if (loopCounter == 198) {
+      loop198(); // This takes ~1500us - no more execution may happen (~3500 total)
+    } else {
+      loopGps(); // This is incredibly variable - only do it on cycles when we don't need all the time
+    }
   }
 
   loopCounter = (loopCounter + 1) % LOOPS_PER_1HZ;
-  lastLoop += LOOP_PERIOD_MICROSECONDS;
+  lastLoop += LOOP_PERIOD_MICROSECONDS; // Increment this so that we'll try and catch up if we've fallen behind
   while (static_cast<int32_t>(micros() - lastLoop) < 0) {
     // Busy loop until it is time for the next cycle
   }
