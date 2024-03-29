@@ -57,7 +57,7 @@ def read_next_message(file, gps, imu, slow):
             return read_slow_message(file, slow)
     except struct.error:
         pass
-    except e:
+    except Exception as e:
         print(e)
     return False
 
@@ -114,11 +114,8 @@ def read_slow_message(file, slow):
     return True
 
 def read_timestamp(file):
-    values = struct.unpack("<IIIIIII", file.read(28))
-    if values[0] == 0:
-        return ""
-    d = datetime.datetime(values[0], values[1], values[2], values[3], values[4], values[5], values[6] * 1000)
-    return '{:%Y-%m-%d %H:%M:%S.%f}'.format(d)
+    values = struct.unpack("<BBBBBBH", file.read(8))
+    return "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}".format(*values)
 
 def main(fc_log: str):
     with open(fc_log, "rb") as fc_log_file:

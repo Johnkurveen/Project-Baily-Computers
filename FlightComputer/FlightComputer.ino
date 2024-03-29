@@ -22,7 +22,7 @@ static constexpr uint32_t I2C_CLOCK { 400000 }; // Baseline 100kHz
 static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
 static constexpr uint32_t LOOPS_PER_1HZ { 200 };
 static constexpr uint32_t LOOPS_PER_100HZ { 2 };
-static constexpr adsGain_t ADC_GAIN { GAIN_TWO };
+static constexpr adsGain_t ADC_GAIN { GAIN_ONE };
 static constexpr size_t ANALOG_COUNT { 10 };
 static constexpr uint32_t LED_PIN { 5 };
 static constexpr int ADC_BITS { 12 };
@@ -103,7 +103,6 @@ void setup() {
   Serial.println("Attempting to Initialize Hardware");
 
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
-  // The faster baud rate works
   if (!gps.begin(9600)) {
     halt("Failed to start GPS");
   }
@@ -156,7 +155,7 @@ void logTime() {
   uint32_t day = static_cast<uint32_t>(gps.day) + (hour / 24);
   hour = hour % 24;
   uint32_t month = static_cast<uint32_t>(gps.month);
-  uint32_t year = static_cast<uint32_t>(gps.year)+2000;
+  uint32_t year = static_cast<uint32_t>(gps.year);
   if (!everFixed)
   {
     milliseconds = 0;
@@ -167,13 +166,13 @@ void logTime() {
     month = 0;
     year = 0;
   }
-  logFile.push<uint32_t>(year);
-  logFile.push<uint32_t>(month);
-  logFile.push<uint32_t>(day);
-  logFile.push<uint32_t>(hour);
-  logFile.push<uint32_t>(minutes);
-  logFile.push<uint32_t>(seconds);
-  logFile.push<uint32_t>(milliseconds);
+  logFile.push<uint8_t>(static_cast<uint8_t>(year));
+  logFile.push<uint8_t>(static_cast<uint8_t>(month));
+  logFile.push<uint8_t>(static_cast<uint8_t>(day));
+  logFile.push<uint8_t>(static_cast<uint8_t>(hour));
+  logFile.push<uint8_t>(static_cast<uint8_t>(minutes));
+  logFile.push<uint8_t>(static_cast<uint8_t>(seconds));
+  logFile.push<uint16_t>(static_cast<uint16_t>(milliseconds));
 }
 
 void loopGps() {
@@ -182,6 +181,7 @@ void loopGps() {
   static uint32_t lastMessageTime {};
   static constexpr int32_t MILLIS_TO_WAIT { 1000 };
   static bool needsToHandleMessage {false};
+  static bool everFixed { false };
 
   // Read data from the GPS - this is necessary
   (void)gps.read();
@@ -197,6 +197,11 @@ void loopGps() {
 
   if (needsToHandleMessage && (static_cast<int32_t>(millis() - lastMessageTime) > MILLIS_TO_WAIT)) {
     needsToHandleMessage = false;
+
+    if (!everFixed && gps.fix) {
+      everFixed = true;
+      Serial.println("GPS Fix");
+    }
 
     logFile.push<uint8_t>(0x10); // GPS Data
     logFile.push<uint8_t>(gps.hour);
