@@ -38,6 +38,11 @@ Adafruit_LSM9DS1 lsm {};
 MS5611 ms5611 { 0x77 };
 Adafruit_ADS1115 zebra {};
 
+static bool gps_init { false };
+static bool lsm_init { false };
+static bool ms5611_init { false };
+static bool zebra_init { false };
+
 Average<Decimal> analogAverages[ANALOG_COUNT];
 
 BufferedFile<4096> logFile;
@@ -72,7 +77,7 @@ void setup() {
     halt("SD Card initialization failed!");
   }
 
-  char filename[32];
+  char filename[32] = {'\0'};
   strcpy(filename, "/LOGS0000");
   for (uint16_t i = 0; i < 10000; i++) {
     filename[5] = '0' + i/1000;
@@ -103,29 +108,30 @@ void setup() {
   Serial.println("Attempting to Initialize Hardware");
 
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
-  if (!gps.begin(9600)) {
-    halt("Failed to start GPS");
-  }
-
-  // Get all the data 5 times per second
-  gps.sendCommand(PMTK_SET_NMEA_OUTPUT_ALLDATA);
-  gps.sendCommand(PMTK_SET_NMEA_UPDATE_100_MILLIHERTZ);
-
-  if (!lsm.begin())
+  if (gps.begin(9600)) {
   {
-    halt("Failed to start LSM");
+    // Get all the data 5 times per second
+    gps.sendCommand(PMTK_SET_NMEA_OUTPUT_ALLDATA);
+    gps.sendCommand(PMTK_SET_NMEA_UPDATE_100_MILLIHERTZ);
+    gps_init = true;
   }
-  lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_2G);
-  lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
-  lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
 
-  if (!zebra.begin(0x49)) { // ADDR = VIN
-    halt("Failed to start Zebra");
+  if (lsm.begin())
+  {
+    lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_2G);
+    lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
+    lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
+    lsm_init = true;
   }
-  zebra.setGain(ADC_GAIN);
 
-  if (!ms5611.begin()){
-    halt("Failed to start MS5611");
+  if (zebra.begin(0x49)) { // ADDR = VIN
+  {
+    zebra.setGain(ADC_GAIN);
+    zebra_init = true;
+  }
+
+  if (ms5611.begin()){
+    ms5611_init = true;
   }
 
   pinMode(LED_PIN, OUTPUT); // Enable LED output pin
@@ -242,10 +248,18 @@ Decimal readAnalogPin(uint32_t pin) {
 }
 
 void prepareZebraChannel(uint8_t channel) {
-  zebra.startADCReading(MUX_BY_CHANNEL[channel], false);
+  if (zebra_init)
+  {
+     zebra.startADCReading(MUX_BY_CHANNEL[channel], false);
+  }
 }
 
 Decimal readZebraChannel(uint8_t channel) {
+  if (!zebra_init)
+  {
+     return NAN;
+  }
+
   (void)channel;
   while (!zebra.conversionComplete()) {
     // Intentionally left blank
@@ -311,6 +325,8 @@ void loop100Hz() {
 
 void loop196() {
   // ~2900us
+  // unconditionally read ms5611, this function is only called
+  // if it is marked as initialized
   (void)ms5611.read();
 }
 
@@ -322,16 +338,25 @@ void loop198() {
   digitalWrite(LED_PIN, blinkState ? HIGH : LOW);
 
   // ~925us
-  lsm.getMag().getEvent(&mag);
+  if (lsm_init)
+  {
+    lsm.getMag().getEvent(&mag);
+  }
 
   // ~500us
   logFile.push<uint8_t>(0x30); // 1Hz Data
   logTime();
-  logFile.push<float>(mag.magnetic.x);
-  logFile.push<float>(mag.magnetic.y);
-  logFile.push<float>(mag.magnetic.z);
-  logFile.push<float>(ms5611.getTemperature());
-  logFile.push<float>(ms5611.getPressure());
+  if (lsm_init)
+  {
+    logFile.push<float>(mag.magnetic.x);
+    logFile.push<float>(mag.magnetic.y);
+    logFile.push<float>(mag.magnetic.z);
+  }
+  if (ms5611_init)
+  {
+    logFile.push<float>(ms5611.getTemperature());
+    logFile.push<float>(ms5611.getPressure());
+  }
   logFile.push<float>(analogAverages[0].get());
   logFile.push<float>(analogAverages[1].get());
   logFile.push<float>(analogAverages[2].get());
@@ -349,7 +374,10 @@ void loop() {
 
   // We have 5000us to work with
 
-  loopImu(); // This takes ~2000us
+  if (lsm_init)
+  {
+    loopImu(); // This takes ~2000us
+  }
 
   if ((loopCounter % LOOPS_PER_100HZ) == (LOOPS_PER_100HZ - 1)) {
     // This runs every odd loop and takes 2000us
@@ -357,11 +385,17 @@ void loop() {
   } else {
     // No more execution may happen on an odd loop
     if (loopCounter == 196) {
-      loop196(); // This takes ~3000us - no more execution may happen (~5000 total)
+      if (ms5611_init)
+      {
+        loop196(); // This takes ~3000us - no more execution may happen (~5000 total)
+      }
     } else if (loopCounter == 198) {
       loop198(); // This takes ~1500us - no more execution may happen (~3500 total)
     } else {
-      loopGps(); // This is incredibly variable - only do it on cycles when we don't need all the time
+      if (gps_init)
+      {
+        loopGps(); // This is incredibly variable - only do it on cycles when we don't need all the time
+      }
     }
   }
 
