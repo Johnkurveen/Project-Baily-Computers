@@ -42,7 +42,9 @@ SLOW_COLUMNS = [
     "analog_6",
     "analog_7",
     "analog_8",
-    "analog_9"
+    "analog_9",
+    "battery_voltage",
+    "heater_state"
 ]
 
 def read_next_message(file, gps, imu, slow):
@@ -92,7 +94,7 @@ def read_imu_message(file, imu):
 
 def read_slow_message(file, slow):
     timestamp = read_timestamp(file)
-    values = struct.unpack("<fffffffffffffff", file.read(60))
+    values = struct.unpack("<ffffffffffffffff?", file.read(65))
     slow.writerow({
         "timestamp": timestamp,
         "mag_x": values[0],
@@ -109,7 +111,9 @@ def read_slow_message(file, slow):
         "analog_6": values[11],
         "analog_7": values[12],
         "analog_8": values[13],
-        "analog_9": values[14]
+        "analog_9": values[14],
+        "battery_voltage": values[15],
+        "heater_state": values[16]
     })
     return True
 

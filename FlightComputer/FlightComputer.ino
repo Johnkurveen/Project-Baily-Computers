@@ -8,9 +8,16 @@
 #include <MS5611.h>
 #include <SD.h>
 #include <cmath>
+#include <Adafruit_SleepyDog.h>
 
 #include "Average.hpp"
 #include "BufferedFile.hpp"
+
+// Uncomment this to switch to heater test mode
+// #define HEATER_TEST_MODE
+
+// Uncomment this to disable the watchdog timer
+#define WATCHDOG
 
 // what's the name of the hardware serial port?
 #define GPSSerial Serial1
@@ -18,7 +25,8 @@
 
 using Decimal = float;
 
-static constexpr uint32_t I2C_CLOCK { 400000 }; // Baseline 100kHz
+static constexpr int WATCHDOG_TIMEOUT_MILLIS { 2000 }; // 2 seconds
+static constexpr uint32_t I2C_CLOCK { 100000 }; // Baseline 100kHz
 static constexpr uint32_t LOOP_PERIOD_MICROSECONDS { 5000 };
 static constexpr uint32_t LOOPS_PER_1HZ { 200 };
 static constexpr uint32_t LOOPS_PER_100HZ { 2 };
@@ -29,8 +37,17 @@ static constexpr int ADC_BITS { 12 };
 static constexpr Decimal KELVIN_CELSIUS_OFFSET { 273.15 };
 static constexpr Decimal ADC_VOLTAGE { 3.3 };
 static constexpr Decimal ADC_DIVISOR { static_cast<Decimal>((1 << ADC_BITS) - 1) };
-static constexpr Decimal THERMISTOR_RESISTOR_VALUE {100000};
-static constexpr Decimal THERMISTOR_HIGH_VOLTAGE {3.3};
+// static constexpr Decimal  {100000};
+// static constexpr Decimal THERMISTOR_HIGH_VOLTAGE {3.3};
+static constexpr Decimal HEATER_PRESSURE_LIMIT { 900 }; // 900 mBar = 90000kPa = ~90% atm
+static constexpr uint32_t HEATER_MINIMUM_RUNTIME_SECONDS { 60 * 1 }; // seconds
+static constexpr uint32_t HEATER_PIN { 6 };
+static constexpr Decimal HEATER_ON_THRESHOLD { -10 }; // Celsius
+static constexpr Decimal HEATER_OFF_THRESHOLD { -5 }; // Celsius
+static constexpr uint32_t BATTERY_VOLTAGE_PIN {9};
+static constexpr Decimal BATTERY_TOP_RESISTOR { 10000 }; // 10k
+static constexpr Decimal BATTERY_BOTTOM_RESISTOR { 5600 }; // 5.6k
+static constexpr Decimal BATTERY_VOLTAGE_MULT { ADC_VOLTAGE * (BATTERY_TOP_RESISTOR + BATTERY_BOTTOM_RESISTOR) / BATTERY_BOTTOM_RESISTOR };
 
 // Connect to the GPS on the hardware port
 Adafruit_GPS gps { &GPSSerial };
@@ -62,8 +79,7 @@ void halt(char const* message) {
 }
 
 void setup() {
-  Serial.begin(921600);
-  Wire.setClock(I2C_CLOCK);
+  Serial.begin(115200);
   // while (!Serial) {
   //   ; // wait for serial port to connect. Needed for native USB
   // }
@@ -129,9 +145,15 @@ void setup() {
   }
 
   pinMode(LED_PIN, OUTPUT); // Enable LED output pin
+  pinMode(HEATER_PIN, OUTPUT); // Enable heater output pin
+  digitalWrite(HEATER_PIN, LOW); // Make sure that it starts off
   analogReadResolution(ADC_BITS); // Set adc resolution
 
   delay(1000);
+
+#ifdef WATCHDOG
+  (void)Watchdog.enable(WATCHDOG_TIMEOUT_MILLIS);
+#endif
 
   diagnosticLog.println("Initialized Successfully");
   diagnosticLog.close();
@@ -237,6 +259,10 @@ void loopImu() {
   logFile.push<float>(gyro.gyro.z);
 }
 
+Decimal readBatteryVoltage() {
+  return static_cast<Decimal>(analogRead(BATTERY_VOLTAGE_PIN)) / ADC_DIVISOR * BATTERY_VOLTAGE_MULT;
+}
+
 Decimal readAnalogPin(uint32_t pin) {
   return static_cast<Decimal>(analogRead(pin)) / ADC_DIVISOR * ADC_VOLTAGE;
 }
@@ -289,22 +315,26 @@ Decimal readAnalog(size_t channel) {
   return result;
 }
 
-Decimal steinhart_hart(Decimal resistance, Decimal a, Decimal b, Decimal c) {
-  // return resistance;
-  Decimal lnResistance { log(resistance) };
-  return Decimal {1} / (a + b * lnResistance + c * lnResistance * lnResistance * lnResistance);
-}
+// Decimal steinhart_hart(Decimal resistance, Decimal a, Decimal b, Decimal c) {
+//   // return resistance;
+//   Decimal lnResistance { log(resistance) };
+//   return Decimal {1} / (a + b * lnResistance + c * lnResistance * lnResistance * lnResistance);
+// }
 
-Decimal voltage_to_resistance(Decimal voltage) {
-  // return voltage;
-  return THERMISTOR_RESISTOR_VALUE * (THERMISTOR_HIGH_VOLTAGE - voltage) / voltage;
-}
+// Decimal voltage_to_resistance(Decimal voltage) {
+//   // return voltage;
+//   return THERMISTOR_RESISTOR_VALUE * (THERMISTOR_HIGH_VOLTAGE - voltage) / voltage;
+// }
 
 void loop100Hz() {
   static size_t loopCounter { 0 };
 
   // ~2100us worst case
   analogAverages[loopCounter].insert(readAnalog(loopCounter));
+
+#ifdef WATCHDOG
+  Watchdog.reset(); // Pet the dog
+#endif
 
   loopCounter = (loopCounter + 1) % 10;
 }
@@ -316,10 +346,31 @@ void loop196() {
 
 void loop198() {
   static bool blinkState { false };
+  static uint8_t heaterState { 0 };
+  static uint32_t heaterTimer { 0 };
   sensors_event_t mag {};
 
   blinkState = !blinkState;
   digitalWrite(LED_PIN, blinkState ? HIGH : LOW);
+
+#ifndef HEATER_TEST_MODE
+  if (heaterTimer < HEATER_MINIMUM_RUNTIME_SECONDS) { // Prevent it from waking up, pulling too much current, and crashing
+    heaterTimer++;
+  } else if (ms5611.getPressure() < HEATER_PRESSURE_LIMIT) { // Make sure that we don't turn on the heater on the ground
+#endif
+    // Bang bang control
+    if (ms5611.getTemperature() <= HEATER_ON_THRESHOLD) {
+      digitalWrite(HEATER_PIN, HIGH);
+      heaterState = 1;
+    } else if (ms5611.getTemperature() >= HEATER_OFF_THRESHOLD) {
+      digitalWrite(HEATER_PIN, LOW);
+      heaterState = 0;
+    }
+#ifndef HEATER_TEST_MODE
+  } else {
+    digitalWrite(HEATER_PIN, LOW);
+  }
+#endif
 
   // ~925us
   lsm.getMag().getEvent(&mag);
@@ -342,6 +393,8 @@ void loop198() {
   logFile.push<float>(analogAverages[7].get());
   logFile.push<float>(analogAverages[8].get());
   logFile.push<float>(analogAverages[9].get());
+  logFile.push<float>(readBatteryVoltage());
+  logFile.push<uint8_t>(heaterState);
 }
 
 void loop() {
