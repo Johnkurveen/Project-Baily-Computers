@@ -48,6 +48,7 @@ static constexpr uint32_t BATTERY_VOLTAGE_PIN {9};
 static constexpr Decimal BATTERY_TOP_RESISTOR { 10000 }; // 10k
 static constexpr Decimal BATTERY_BOTTOM_RESISTOR { 5600 }; // 5.6k
 static constexpr Decimal BATTERY_VOLTAGE_MULT { ADC_VOLTAGE * (BATTERY_TOP_RESISTOR + BATTERY_BOTTOM_RESISTOR) / BATTERY_BOTTOM_RESISTOR };
+static constexpr unsigned int WATCHDOG_RESET_BIT { 0b00100000 };
 
 // Connect to the GPS on the hardware port
 Adafruit_GPS gps { &GPSSerial };
@@ -62,16 +63,25 @@ File diagnosticLog;
 
 uint32_t lastLoop { 0 };
 
+#ifdef WATCHDOG
+#define PET_WATCHDOG() (void)Watchdog.reset()
+#else
+#define PET_WATCHDOG() do {} while(0)
+#endif
+
 void halt(char const* message, char const* message2) {
   if (diagnosticLog) {
     diagnosticLog.print(message);
     diagnosticLog.println(message2);
     diagnosticLog.close();
   }
-  while (true) {
+  for (uint32_t i {0}; true; i++) {
     Serial.print(message);
     Serial.println(message2);
-    delay(1000);
+    delay(100);
+    if (i < 20) {
+      PET_WATCHDOG();
+    }
   }
 }
 void halt(char const* message) {
@@ -88,6 +98,11 @@ void setup() {
     halt("SD Card initialization failed!");
   }
 
+
+#ifdef WATCHDOG
+  (void)Watchdog.enable(WATCHDOG_TIMEOUT_MILLIS);
+#endif
+
   char filename[32];
   strcpy(filename, "/LOGS0000");
   for (uint16_t i = 0; i < 10000; i++) {
@@ -99,14 +114,19 @@ void setup() {
     if (!SD.exists(filename)) {
       break;
     }
+    PET_WATCHDOG();
   }
 
   if (!SD.mkdir(filename)) {
     halt("Couldn't create ", filename);
   }
 
+  PET_WATCHDOG();
+
   strcpy(&filename[9], "/DIA.LOG");
   diagnosticLog = SD.open(filename, FILE_WRITE);
+
+  PET_WATCHDOG();
 
   strcpy(&filename[9], "/LOG.DAT");
   logFile = { filename };
@@ -114,9 +134,20 @@ void setup() {
     halt("Couldn't create ", filename);
   }
 
+#ifdef WATCHDOG
+  PET_WATCHDOG();
+  if ((static_cast<unsigned int>(Watchdog.resetCause()) & WATCHDOG_RESET_BIT) != 0) {
+    diagnosticLog.println("Reset due to Watchdog");
+    diagnosticLog.flush();
+    Serial.println("Reset due to Watchdog");
+  }
+#endif
+
   diagnosticLog.println("Attempting to Initialize Hardware");
   diagnosticLog.flush();
   Serial.println("Attempting to Initialize Hardware");
+
+  PET_WATCHDOG();
 
   // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
   if (!gps.begin(9600)) {
@@ -127,6 +158,8 @@ void setup() {
   gps.sendCommand(PMTK_SET_NMEA_OUTPUT_ALLDATA);
   gps.sendCommand(PMTK_SET_NMEA_UPDATE_100_MILLIHERTZ);
 
+  PET_WATCHDOG();
+
   if (!lsm.begin())
   {
     halt("Failed to start LSM");
@@ -135,25 +168,27 @@ void setup() {
   lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
   lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_245DPS);
 
+  PET_WATCHDOG();
+
   if (!zebra.begin(0x49)) { // ADDR = VIN
     halt("Failed to start Zebra");
   }
   zebra.setGain(ADC_GAIN);
 
+  PET_WATCHDOG();
+
   if (!ms5611.begin()){
     halt("Failed to start MS5611");
   }
+
+  PET_WATCHDOG();
 
   pinMode(LED_PIN, OUTPUT); // Enable LED output pin
   pinMode(HEATER_PIN, OUTPUT); // Enable heater output pin
   digitalWrite(HEATER_PIN, LOW); // Make sure that it starts off
   analogReadResolution(ADC_BITS); // Set adc resolution
 
-  delay(1000);
-
-#ifdef WATCHDOG
-  (void)Watchdog.enable(WATCHDOG_TIMEOUT_MILLIS);
-#endif
+  PET_WATCHDOG();
 
   diagnosticLog.println("Initialized Successfully");
   diagnosticLog.close();
@@ -332,9 +367,7 @@ void loop100Hz() {
   // ~2100us worst case
   analogAverages[loopCounter].insert(readAnalog(loopCounter));
 
-#ifdef WATCHDOG
-  Watchdog.reset(); // Pet the dog
-#endif
+  PET_WATCHDOG();
 
   loopCounter = (loopCounter + 1) % 10;
 }
